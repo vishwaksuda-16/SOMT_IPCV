@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { Mic, Search, Camera, Shield, ShieldAlert, History, Activity, Zap, Info, Trash2, Play, Square, Save, ToggleLeft, ToggleRight } from 'lucide-react';
 
-const BACKEND_URL = 'http://127.0.0.1:8000';
+const BACKEND_URL = '/api';
 
 function App() {
   const [cameraId] = useState(`cam-${Math.random().toString(36).substring(2, 9)}`);
