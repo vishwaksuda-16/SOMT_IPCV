@@ -1,14 +1,23 @@
-# Python virtual environment
+# --- Python / Backend ---
 backend/venv/
 backend/.venv/
-__pycache__/
+**/__pycache__/
 *.pyc
+# Ignore the heavy YOLO model
+*.pt
+# Ignore the local database files
+*.index
+# Ignore the captured photos (Keep your GitHub light)
+backend/memory_photos/
 
-# Node.js dependencies
+# --- Node / Frontend ---
 frontend/node_modules/
 frontend/dist/
+frontend/dev-dist/
+.eslintcache
 
-# Project specific
-backend/memory_photos/
-backend/*.pt
+# --- OS / Editors ---
+.vscode/
+.idea/
 .DS_Store
+Thumbs.db
