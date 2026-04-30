@@ -39,7 +39,8 @@ app.mount("/memory_photos", StaticFiles(directory=PHOTOS_DIR), name="memory_phot
 # ── Global Settings ───────────────────────────────────────────────────────────
 settings = {
     "privacy_mode": False,
-    "auto_mode": True
+    "auto_mode": True,
+    "detect_persons": True   # Only relevant when privacy_mode is False
 }
 
 # How many consecutive missed frames before object is considered gone and saved.
@@ -78,6 +79,7 @@ def _blur_people(frame, conf=CONF_THRESHOLD):
 class SettingsUpdate(BaseModel):
     privacy_mode: bool = None
     auto_mode: bool = None
+    detect_persons: bool = None
 
 # ── Settings Endpoints ────────────────────────────────────────────────────────
 @app.post("/toggle-privacy")
@@ -99,6 +101,16 @@ async def toggle_auto(update: SettingsUpdate):
 @app.get("/toggle-auto")
 async def get_auto():
     return {"auto_mode": settings["auto_mode"]}
+
+@app.post("/toggle-detect-persons")
+async def toggle_detect_persons(update: SettingsUpdate):
+    if update.detect_persons is not None:
+        settings["detect_persons"] = update.detect_persons
+    return {"detect_persons": settings["detect_persons"]}
+
+@app.get("/toggle-detect-persons")
+async def get_detect_persons():
+    return {"detect_persons": settings["detect_persons"]}
 
 @app.get("/status")
 async def get_status():
@@ -152,6 +164,12 @@ async def process_frame(
     # Run YOLO detection with lowered threshold for better real-world recall
     results = detector.predict(frame, conf=CONF_THRESHOLD, verbose=False)
 
+    # Determine person visibility rules:
+    # - privacy_mode=True  → persons are NEVER shown or saved (hard block)
+    # - privacy_mode=False → persons shown/saved only if detect_persons=True
+    privacy_on     = settings["privacy_mode"]
+    allow_persons  = (not privacy_on) and settings["detect_persons"]
+
     current_frame_labels = []
     active_objects = camera_tracker.get_active(camera_id)
     lost_buffer    = camera_tracker.get_lost(camera_id)
@@ -161,6 +179,13 @@ async def process_frame(
             label = detector.names[int(box.cls[0])]
             conf  = float(box.conf[0])
             x1, y1, x2, y2 = map(int, box.xyxy[0])
+
+            # Skip person detections when they are not allowed
+            if label == 'person' and not allow_persons:
+                # If person was previously tracked, remove it silently
+                active_objects.pop(label, None)
+                lost_buffer.pop(label, None)
+                continue
 
             current_frame_labels.append({
                 "label": label,
@@ -196,13 +221,19 @@ async def process_frame(
                 # FIX: Only trigger archive when object is CONFIRMED gone
                 # (threshold check lives INSIDE the "not in current" branch)
                 if lost_buffer[label] >= STABILITY_THRESHOLD:
+                    # In privacy mode, persons were never tracked, so this
+                    # branch only fires for non-person objects. Double-check
+                    # just in case stale data exists.
+                    if label == 'person' and not allow_persons:
+                        del active_objects[label]
+                        del lost_buffer[label]
+                        continue
+
                     data = active_objects[label]
                     vector = get_embedding(data["crop"])
                     ts_file = datetime.now().strftime("%H%M%S%f")[:12]
 
                     save_frame = data["full"].copy()
-                    if settings["privacy_mode"]:
-                        save_frame = _blur_people(save_frame)
 
                     img_path = os.path.join(
                         "memory_photos",
@@ -262,6 +293,9 @@ async def manual_save(
     if not results[0].boxes:
         return {"error": "No objects detected — try pointing at a clear object in good lighting"}
 
+    privacy_on    = settings["privacy_mode"]
+    allow_persons = (not privacy_on) and settings["detect_persons"]
+
     # Save ALL detected objects (not just the first one)
     saved = []
     ts = datetime.now()
@@ -269,13 +303,15 @@ async def manual_save(
     ts_file = ts.strftime("%H%M%S%f")[:12]
 
     save_frame = frame.copy()
-    if settings["privacy_mode"]:
-        save_frame = _blur_people(save_frame)
 
     for box in results[0].boxes:
         label = detector.names[int(box.cls[0])]
         conf  = float(box.conf[0])
         x1, y1, x2, y2 = map(int, box.xyxy[0])
+
+        # Respect privacy & detect_persons settings
+        if label == 'person' and not allow_persons:
+            continue
 
         obj_crop = frame[max(0, y1):y2, max(0, x1):x2]
         if obj_crop.size == 0:

@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { BrowserRouter, Routes, Route, NavLink, useLocation } from 'react-router-dom';
 import axios from 'axios';
 import {
   Mic, Search, Camera, Shield, ShieldAlert, History,
   Activity, Trash2, Play, Square, Save, ToggleLeft, ToggleRight,
-  Clock, Eye, X, Cpu, CheckCircle, Wifi, WifiOff, BookMarked
+  Clock, Eye, X, Cpu, CheckCircle, Wifi, WifiOff, BookMarked, UserX, User
 } from 'lucide-react';
 
 const BACKEND_URL = '/api';
@@ -55,13 +56,14 @@ function ConfBadge({ conf }) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Main App
+// Main App Content
 // ═══════════════════════════════════════════════════════════════
-function App() {
+function AppContent() {
   // ── State ────────────────────────────────────────────────────
   const [cameraId]    = useState(`cam-${Math.random().toString(36).substring(2, 7)}`);
   const [privacyMode, setPrivacyMode] = useState(false);
   const [autoMode,    setAutoMode]    = useState(true);
+  const [detectPersons, setDetectPersons] = useState(true);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isRecordingVoice, setIsRecordingVoice] = useState(false);
 
@@ -92,15 +94,24 @@ function App() {
     return () => clearInterval(id);
   }, []);
 
+  // Reattach stream if returning to camera page
+  useEffect(() => {
+    if (isStreaming && videoRef.current && videoRef.current.srcObject !== streamRef.current) {
+      videoRef.current.srcObject = streamRef.current;
+    }
+  });
+
   // ── Settings ─────────────────────────────────────────────────
   const fetchSettings = async () => {
     try {
-      const [rP, rA] = await Promise.all([
+      const [rP, rA, rD] = await Promise.all([
         axios.get(`${BACKEND_URL}/toggle-privacy`),
         axios.get(`${BACKEND_URL}/toggle-auto`),
+        axios.get(`${BACKEND_URL}/toggle-detect-persons`),
       ]);
       setPrivacyMode(rP.data.privacy_mode);
       setAutoMode(rA.data.auto_mode);
+      setDetectPersons(rD.data.detect_persons);
       setBackendOnline(true);
     } catch {
       setBackendOnline(false);
@@ -113,7 +124,12 @@ function App() {
     try {
       await axios.post(`${BACKEND_URL}/toggle-privacy`, { privacy_mode: next });
       setPrivacyMode(next);
-      toast(`Privacy mode ${next ? 'enabled' : 'disabled'}`, next ? 'success' : 'info');
+      toast(
+        next
+          ? '🔒 Privacy mode ON — persons will not be captured or saved'
+          : 'Privacy mode disabled',
+        next ? 'success' : 'info'
+      );
     } catch { toast('Backend unreachable', 'error'); }
   };
 
@@ -123,6 +139,18 @@ function App() {
       await axios.post(`${BACKEND_URL}/toggle-auto`, { auto_mode: next });
       setAutoMode(next);
       toast(`Auto-save ${next ? 'on' : 'off'}`, next ? 'success' : 'info');
+    } catch { toast('Backend unreachable', 'error'); }
+  };
+
+  const toggleDetectPersons = async () => {
+    const next = !detectPersons;
+    try {
+      await axios.post(`${BACKEND_URL}/toggle-detect-persons`, { detect_persons: next });
+      setDetectPersons(next);
+      toast(
+        next ? '👤 Person detection enabled' : '🚫 Person detection disabled',
+        next ? 'success' : 'info'
+      );
     } catch { toast('Backend unreachable', 'error'); }
   };
 
@@ -248,32 +276,45 @@ function App() {
   };
 
   // ── Search ───────────────────────────────────────────────────
+  const extractKeywords = (text) => {
+    const stops = new Set(["where","is","my","the","a","an","find","search","for","are","look","i","put","did","see","can","you","have","it","in","on","at","of"]);
+    return text.toLowerCase().replace(/[^a-z ]/g,'').split(' ').filter(w => w && !stops.has(w)).join(' ') || text;
+  };
+
   const handleSearch = async (q) => {
-    const query = (q ?? searchQuery).trim();
-    if (!query) return;
+    // If q is an event, we don't want to use it as a string
+    const rawQuery = typeof q === 'string' ? q : searchQuery;
+    if (!rawQuery.trim()) return;
+    
+    // Extract keywords to improve match rate for phrases like "where is my bottle"
+    const query = extractKeywords(rawQuery);
     try {
       const res = await axios.get(`${BACKEND_URL}/search`, { params: { query } });
       const matches = res.data.matches || [];
       setSearchResults(matches);
-      if (matches.length === 0) toast(`"${query}" not found in memory`, 'error');
-      else toast(`Found ${matches.length} result${matches.length > 1 ? 's' : ''}`, 'success');
+      if (matches.length === 0) {
+        toast(`"${query}" not found in memory`, 'error');
+      } else {
+        toast(`Found ${matches.length} result${matches.length > 1 ? 's' : ''}`, 'success');
+        // Instantly display the last seen image via the evidence modal
+        setEvidenceModal(matches[0]);
+      }
     } catch { toast('Search failed — backend unreachable', 'error'); }
   };
 
   // ── Voice Search ─────────────────────────────────────────────
   const handleVoiceSearch = () => {
-    if (!('webkitSpeechRecognition' in window)) {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
       toast('Voice search not supported in this browser', 'error'); return;
     }
-    const r = new window.webkitSpeechRecognition();
+    const r = new SpeechRecognition();
     r.lang = 'en-US'; r.interimResults = false; r.maxAlternatives = 1;
     r.onstart  = () => setIsRecordingVoice(true);
     r.onresult = (e) => {
-      const text = e.results[0][0].transcript.toLowerCase();
-      const stops = new Set(["where","is","my","the","a","an","find","search","for","are","look","i","put","did","see","can","you","have","it"]);
-      const kw = text.replace(/[^a-z ]/g,'').split(' ').filter(w => w && !stops.has(w)).pop() || text;
-      setSearchQuery(kw);
-      handleSearch(kw);
+      const text = e.results[0][0].transcript;
+      setSearchQuery(text);
+      handleSearch(text);
     };
     r.onerror = () => { setIsRecordingVoice(false); toast('Voice error', 'error'); };
     r.onend   = () => setIsRecordingVoice(false);
@@ -301,36 +342,22 @@ function App() {
       {/* ── HEADER ─────────────────────────────────────────── */}
       <header className="app-header">
         {/* Logo */}
-        <div className="logo-mark">
+        <NavLink to="/" className="logo-mark" style={{ cursor: 'pointer', textDecoration: 'none' }}>
           <div className="logo-icon"><Cpu size={17} color="white" /></div>
           <div>
-            <div className="logo-title">VisualRAG</div>
-            <div className="logo-subtitle">Object Memory</div>
+            <div className="logo-title" style={{color: 'white'}}>VisualRAG</div>
+            <div className="logo-subtitle" style={{color: 'rgba(255,255,255,0.7)'}}>Object Memory</div>
           </div>
-        </div>
+        </NavLink>
 
-        {/* Search bar */}
-        <div className={`header-search${searchFocused ? ' focused' : ''}`}>
-          <Search size={15} className="hs-icon" />
-          <input
-            className="hs-input"
-            type="text"
-            value={searchQuery}
-            placeholder="Where is my bottle?"
-            onFocus={() => setSearchFocused(true)}
-            onBlur={() => setSearchFocused(false)}
-            onChange={e => { setSearchQuery(e.target.value); if (!e.target.value) setSearchResults(null); }}
-            onKeyDown={e => e.key === 'Enter' && handleSearch()}
-          />
-          {searchQuery && (
-            <button className="hs-clear" onClick={() => { setSearchQuery(''); setSearchResults(null); }}>
-              <X size={13} />
-            </button>
-          )}
-          <button className={`hs-voice${isRecordingVoice ? ' recording' : ''}`} onClick={handleVoiceSearch} title="Voice search">
-            <Mic size={14} />
-          </button>
-          <button className="hs-btn" onClick={() => handleSearch()}>Search</button>
+        {/* Navigation Tabs (now React Router Links) */}
+        <div className="nav-tabs">
+          <NavLink to="/" className={({isActive}) => `nav-tab ${isActive ? 'active' : ''}`}>
+            <Camera size={14} /> Live Camera
+          </NavLink>
+          <NavLink to="/memory" className={({isActive}) => `nav-tab ${isActive ? 'active' : ''}`}>
+            <BookMarked size={14} /> Memory & Search
+          </NavLink>
         </div>
 
         {/* Controls */}
@@ -343,6 +370,18 @@ function App() {
             {autoMode ? <ToggleRight size={14} /> : <ToggleLeft size={14} />}
             <span>Auto</span>
           </button>
+          {/* Detect Persons toggle — only visible when NOT in privacy mode */}
+          {!privacyMode && (
+            <button
+              id="toggle-detect-persons"
+              className={`toggle-pill${detectPersons ? ' active-auto' : ''}`}
+              onClick={toggleDetectPersons}
+              title={detectPersons ? 'Click to disable person detection' : 'Click to enable person detection'}
+            >
+              {detectPersons ? <User size={14} /> : <UserX size={14} />}
+              <span>Persons</span>
+            </button>
+          )}
           <button className={`toggle-pill${privacyMode ? ' active-privacy' : ''}`} onClick={togglePrivacyMode}>
             {privacyMode ? <Shield size={14} /> : <ShieldAlert size={14} />}
             <span>Privacy</span>
@@ -352,155 +391,207 @@ function App() {
 
       {/* ── MAIN ───────────────────────────────────────────── */}
       <main className="app-main">
-
-        {/* Search results panel */}
-        {searchResults !== null && (
-          <section className="results-section">
-            <div className="results-bar">
-              <span className="section-title"><Eye size={14} />{searchResults.length} result{searchResults.length !== 1 ? 's' : ''}</span>
-              <button className="btn-icon-sm" onClick={() => { setSearchResults(null); setSearchQuery(''); }}>
-                <X size={13} /> Clear
-              </button>
-            </div>
-            {searchResults.length > 0 ? (
-              <div className="results-grid">
-                {searchResults.map((item, i) => (
-                  <div key={i} className="result-card" onClick={() => setEvidenceModal(item)}>
-                    <img src={`${BACKEND_URL}/${item.img}`} alt={item.label} className="result-thumb" />
-                    <div className="result-info">
-                      <div className="result-label">{item.label}</div>
-                      <div className="result-time"><Clock size={10} />{item.time}</div>
-                    </div>
+        <Routes>
+          <Route path="/" element={
+            <div className="content-grid" style={{ gridTemplateColumns: '1fr', maxWidth: '900px', margin: '0 auto' }}>
+              {/* ── CAMERA ─────────────────────────────────────── */}
+              <section className="camera-section">
+                <div className="section-header">
+                  <span className="section-title">
+                    <Camera size={14} />Live Feed
+                    {isStreaming && <span className="frame-badge">Frame #{frameCount}</span>}
+                  </span>
+                  <div className="cam-actions">
+                    <button className="btn-icon-sm" onClick={handleManualSave} disabled={!isStreaming}>
+                      <Save size={12} /> Save Now
+                    </button>
+                    <button
+                      className={`btn-icon-sm ${isStreaming ? 'btn-stop' : 'btn-start'}`}
+                      onClick={toggleCamera}
+                    >
+                      {isStreaming ? <><Square size={12} /> Stop</> : <><Play size={12} /> Start</>}
+                    </button>
                   </div>
-                ))}
-              </div>
-            ) : (
-              <div className="results-empty">Nothing in memory matching that query.</div>
-            )}
-          </section>
-        )}
+                </div>
 
-        {/* Main content grid */}
-        <div className="content-grid">
+                {/* Video viewport */}
+                <div className="camera-viewport">
+                  <video ref={videoRef} className="camera-video" autoPlay playsInline muted />
+                  <canvas ref={canvasRef} style={{ display: 'none' }} />
 
-          {/* ── CAMERA ─────────────────────────────────────── */}
-          <section className="camera-section">
-            <div className="section-header">
-              <span className="section-title">
-                <Camera size={14} />Live Feed
-                {isStreaming && <span className="frame-badge">Frame #{frameCount}</span>}
-              </span>
-              <div className="cam-actions">
-                <button className="btn-icon-sm" onClick={handleManualSave} disabled={!isStreaming}>
-                  <Save size={12} /> Save Now
-                </button>
-                <button
-                  className={`btn-icon-sm ${isStreaming ? 'btn-stop' : 'btn-start'}`}
-                  onClick={toggleCamera}
-                >
-                  {isStreaming ? <><Square size={12} /> Stop</> : <><Play size={12} /> Start</>}
-                </button>
-              </div>
-            </div>
+                  {isStreaming && <div className="cam-badge live-badge"><span className="live-dot" />LIVE</div>}
+                  {isStreaming && <div className="scan-line" />}
 
-            {/* Video viewport */}
-            <div className="camera-viewport">
-              <video ref={videoRef} className="camera-video" autoPlay playsInline muted />
-              <canvas ref={canvasRef} style={{ display: 'none' }} />
-
-              {isStreaming && <div className="cam-badge live-badge"><span className="live-dot" />LIVE</div>}
-              {isStreaming && <div className="scan-line" />}
-
-              {/* Bounding boxes */}
-              {isStreaming && videoNative && detectedObjects.map((obj, i) => {
-                const s = boxStyle(obj.box);
-                if (!s) return null;
-                const isPrivate = privacyMode && obj.label === 'person';
-                return (
-                  <div key={`${obj.label}-${i}`} className={`det-box${isPrivate ? ' privacy-box' : ''}`} style={s}>
-                    {!isPrivate && (
-                      <>
+                  {/* Bounding boxes */}
+                  {isStreaming && videoNative && detectedObjects
+                    .filter(obj => obj.label !== 'person' || (detectPersons && !privacyMode))
+                    .map((obj, i) => {
+                    const s = boxStyle(obj.box);
+                    if (!s) return null;
+                    return (
+                      <div key={`${obj.label}-${i}`} className="det-box" style={s}>
                         <span className="det-label">
                           {obj.label}
                           {obj.conf ? <ConfBadge conf={obj.conf} /> : null}
                         </span>
                         <span className="det-corner tl" /><span className="det-corner tr" />
                         <span className="det-corner bl" /><span className="det-corner br" />
-                      </>
-                    )}
-                  </div>
-                );
-              })}
+                      </div>
+                    );
+                  })}
 
-              {/* Camera off placeholder */}
-              {!isStreaming && (
-                <div className="cam-placeholder">
-                  <Camera size={44} />
-                  <p>Press <strong>Start</strong> to enable camera</p>
-                  <p className="cam-hint">Objects are automatically archived when they leave the frame</p>
-                </div>
-              )}
-            </div>
-
-            {/* Live detection tags + tracking progress */}
-            <div className="det-status-area">
-              {isStreaming && detectedObjects.length === 0 && (
-                <span className="det-scanning">Scanning… (conf ≥ 45%)</span>
-              )}
-              <div className="det-tags-row">
-                {detectedObjects.map((obj, i) => (
-                  <span key={`tag-${i}`} className="det-tag">
-                    <span className="det-dot" />{obj.label}
-                    {obj.conf && <ConfBadge conf={obj.conf} />}
-                  </span>
-                ))}
-              </div>
-
-              {/* Auto-save countdown bars for objects that have left frame */}
-              {autoMode && Object.entries(trackingProgress).filter(([lbl]) =>
-                !detectedObjects.find(d => d.label === lbl) && trackingProgress[lbl] > 0
-              ).map(([lbl, pct]) => (
-                <div key={lbl} className="tracking-row">
-                  <span className="tracking-label"><BookMarked size={10} /> saving {lbl}…</span>
-                  <div className="tracking-bar-wrap">
-                    <div className="tracking-bar" style={{ width: `${pct}%` }} />
-                  </div>
-                  <span className="tracking-pct">{pct}%</span>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          {/* ── HISTORY SIDEBAR ────────────────────────────── */}
-          <aside className="history-sidebar">
-            <div className="history-header">
-              <span className="section-title">
-                <History size={14} />Memory Log
-                <span className="history-count-badge">{history.length}</span>
-              </span>
-              <button className="btn-danger-sm" onClick={clearHistory} title="Clear all"><Trash2 size={13} /></button>
-            </div>
-            <div className="history-scroll">
-              {history.length === 0 ? (
-                <div className="history-empty">
-                  <Activity size={32} />
-                  <p>No objects saved yet.<br />Objects are archived when they leave the camera frame.</p>
-                </div>
-              ) : (
-                history.map((item, i) => (
-                  <div key={i} className="history-item" onClick={() => setEvidenceModal(item)}>
-                    <img src={`${BACKEND_URL}/${item.img}`} alt={item.label} className="history-thumb" />
-                    <div className="history-info">
-                      <div className="history-label">{item.label}</div>
-                      <div className="history-meta"><Clock size={10} />{item.time}</div>
-                      <div className="history-meta"><Camera size={10} />{item.camera_id}</div>
+                  {/* Camera off placeholder */}
+                  {!isStreaming && (
+                    <div className="cam-placeholder">
+                      <Camera size={44} />
+                      <p>Press <strong>Start</strong> to enable camera</p>
+                      <p className="cam-hint">Objects are automatically archived when they leave the frame</p>
                     </div>
+                  )}
+
+                  {/* Privacy mode overlay banner */}
+                  {isStreaming && privacyMode && (
+                    <div style={{
+                      position: 'absolute', bottom: 10, left: '50%', transform: 'translateX(-50%)',
+                      background: 'rgba(99,102,241,0.85)', color: '#fff',
+                      borderRadius: 20, padding: '5px 14px', fontSize: 11, fontWeight: 600,
+                      display: 'flex', alignItems: 'center', gap: 6, backdropFilter: 'blur(4px)',
+                      border: '1px solid rgba(255,255,255,0.2)', pointerEvents: 'none', zIndex: 30
+                    }}>
+                      <Shield size={11} /> Privacy Mode — persons not captured
+                    </div>
+                  )}
+                </div>
+
+                {/* Live detection tags + tracking progress */}
+                <div className="det-status-area">
+                  {isStreaming && detectedObjects.length === 0 && (
+                    <span className="det-scanning">Scanning… (conf ≥ 45%)</span>
+                  )}
+                  <div className="det-tags-row">
+                    {detectedObjects.map((obj, i) => (
+                      <span key={`tag-${i}`} className="det-tag">
+                        <span className="det-dot" />{obj.label}
+                        {obj.conf && <ConfBadge conf={obj.conf} />}
+                      </span>
+                    ))}
                   </div>
-                ))
-              )}
+
+                  {/* Auto-save countdown bars for objects that have left frame */}
+                  {autoMode && Object.entries(trackingProgress).filter(([lbl]) =>
+                    !detectedObjects.find(d => d.label === lbl) && trackingProgress[lbl] > 0
+                  ).map(([lbl, pct]) => (
+                    <div key={lbl} className="tracking-row">
+                      <span className="tracking-label"><BookMarked size={10} /> saving {lbl}…</span>
+                      <div className="tracking-bar-wrap">
+                        <div className="tracking-bar" style={{ width: `${pct}%` }} />
+                      </div>
+                      <span className="tracking-pct">{pct}%</span>
+                    </div>
+                  ))}
+                </div>
+              </section>
             </div>
-          </aside>
-        </div>
+          } />
+          <Route path="/memory" element={
+            <div className="content-grid" style={{ gridTemplateColumns: '1fr', maxWidth: '1000px', margin: '0 auto', gap: '30px' }}>
+              {/* ── MEMORY & SEARCH ────────────────────────────── */}
+              
+              {/* Search Input Section */}
+              <section className="search-input-section" style={{ background: 'var(--bg-glass)', padding: '20px', borderRadius: 'var(--radius-l)', border: '1px solid var(--border)' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
+                  <h3 style={{ margin: 0, fontSize: '16px', fontWeight: '600', color: 'var(--text-1)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <Search size={18} color="var(--accent)" /> Object Search
+                  </h3>
+                  <div className={`header-search${searchFocused ? ' focused' : ''}`} style={{ maxWidth: '100%', height: '44px', padding: '0 12px 0 16px' }}>
+                    <Search size={16} className="hs-icon" />
+                    <input
+                      className="hs-input"
+                      style={{ fontSize: '15px' }}
+                      type="text"
+                      value={searchQuery}
+                      placeholder="Search memory (e.g., 'where is my bottle?')"
+                      onFocus={() => setSearchFocused(true)}
+                      onBlur={() => setSearchFocused(false)}
+                      onChange={e => { setSearchQuery(e.target.value); if (!e.target.value) setSearchResults(null); }}
+                      onKeyDown={e => e.key === 'Enter' && handleSearch()}
+                    />
+                    {searchQuery && (
+                      <button className="hs-clear" onClick={() => { setSearchQuery(''); setSearchResults(null); }}>
+                        <X size={15} />
+                      </button>
+                    )}
+                    <button className={`hs-voice${isRecordingVoice ? ' recording' : ''}`} onClick={handleVoiceSearch} title="Voice search" style={{ width: '32px', height: '32px' }}>
+                      <Mic size={16} />
+                    </button>
+                    <button className="hs-btn" onClick={() => handleSearch()} style={{ padding: '8px 18px', fontSize: '13px' }}>Search</button>
+                  </div>
+                </div>
+              </section>
+
+              {/* Search results panel */}
+              {searchResults !== null && (
+                <section className="results-section">
+                  <div className="results-bar">
+                    <span className="section-title"><Eye size={14} />{searchResults.length} result{searchResults.length !== 1 ? 's' : ''}</span>
+                    <button className="btn-icon-sm" onClick={() => { setSearchResults(null); setSearchQuery(''); }}>
+                      <X size={13} /> Clear
+                    </button>
+                  </div>
+                  {searchResults.length > 0 ? (
+                    <div className="results-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))' }}>
+                      {searchResults.map((item, i) => (
+                        <div key={i} className="result-card" onClick={() => setEvidenceModal(item)}>
+                          <img src={`${BACKEND_URL}/${item.img}`} alt={item.label} className="result-thumb" />
+                          <div className="result-info">
+                            <div className="result-label" style={{ fontSize: '14px' }}>{item.label}</div>
+                            <div className="result-time" style={{ fontSize: '11px' }}><Clock size={12} />{item.time}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="results-empty">Nothing in memory matching that query.</div>
+                  )}
+                </section>
+              )}
+
+              {/* Memory Log Full View */}
+              <section className="history-full-view" style={{ background: 'var(--bg-glass)', border: '1px solid var(--border)', borderRadius: 'var(--radius-l)', overflow: 'hidden' }}>
+                <div className="history-header" style={{ padding: '18px 20px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span className="section-title" style={{ fontSize: '13px' }}>
+                    <History size={16} />Saved Memory
+                    <span className="history-count-badge" style={{ fontSize: '12px', padding: '2px 8px' }}>{history.length}</span>
+                  </span>
+                  <button className="btn-danger-sm" onClick={clearHistory} title="Clear all" style={{ width: 'auto', padding: '0 12px', display: 'flex', gap: '6px' }}>
+                    <Trash2 size={14} /> Clear Log
+                  </button>
+                </div>
+                <div style={{ padding: '20px' }}>
+                  {history.length === 0 ? (
+                    <div className="history-empty" style={{ padding: '60px 20px', textAlign: 'center', color: 'var(--text-3)' }}>
+                      <Activity size={40} style={{ opacity: 0.2, margin: '0 auto 10px' }} />
+                      <p style={{ fontSize: '14px' }}>No objects saved yet.<br />Objects are archived when they leave the camera frame.</p>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: '15px' }}>
+                      {history.map((item, i) => (
+                        <div key={i} className="history-item" onClick={() => setEvidenceModal(item)} style={{ flexDirection: 'column', padding: '0', background: 'var(--bg-surface)' }}>
+                          <img src={`${BACKEND_URL}/${item.img}`} alt={item.label} style={{ width: '100%', height: '140px', objectFit: 'cover', borderRadius: 'calc(var(--radius-m) - 2px) calc(var(--radius-m) - 2px) 0 0', borderBottom: '1px solid var(--border)' }} />
+                          <div className="history-info" style={{ padding: '12px' }}>
+                            <div className="history-label" style={{ fontSize: '14px' }}>{item.label}</div>
+                            <div className="history-meta" style={{ fontSize: '11px', marginTop: '6px' }}><Clock size={12} />{item.time}</div>
+                            <div className="history-meta" style={{ fontSize: '11px', marginTop: '4px' }}><Camera size={12} />{item.camera_id}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </section>
+            </div>
+          } />
+        </Routes>
       </main>
 
       {/* ── EVIDENCE MODAL ─────────────────────────────────── */}
@@ -522,6 +613,14 @@ function App() {
         </div>
       )}
     </div>
+  );
+}
+
+function App() {
+  return (
+    <BrowserRouter>
+      <AppContent />
+    </BrowserRouter>
   );
 }
 

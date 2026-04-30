@@ -19,8 +19,10 @@ class ObjectMemory:
     def search_by_text(self, query_label):
         """Finds the LATEST entry for a specific text label"""
         results = []
+        query_words = set(query_label.lower().split())
         for item in reversed(self.metadata):
-            if query_label.lower() in item['label'].lower():
+            label_lower = item['label'].lower()
+            if query_label.lower() in label_lower or any(w in label_lower for w in query_words):
                 results.append(item)
         return results
 
